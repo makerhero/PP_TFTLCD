@@ -1,0 +1,937 @@
+#include "PP_TFTLCD.h"
+
+
+
+#ifdef USE_ADAFRUIT_SHIELD_PINOUT
+// special defines for the dataport
+ #define DATAPORT1 PORTD
+ #define DATAPIN1 PIND
+ #define DATADDR1 DDRD
+
+ #define DATAPORT2 PORTB
+ #define DATAPIN2 PINB
+ #define DATADDR2 DDRB
+
+ #define DATA1_MASK 0xD0
+ #define DATA2_MASK 0x2F
+
+// for mega & shield usage, we just hardcoded it (its messy)
+
+#else
+ // for the breakout board tutorial, two ports are used :/
+ #define DATAPORT1 PORTD
+ #define DATAPIN1  PIND
+ #define DATADDR1  DDRD
+
+ #define DATAPORT2 PORTB
+ #define DATAPIN2  PINB
+ #define DATADDR2  DDRB
+
+ #define DATA1_MASK 0xFC  // top 6 bits
+ #define DATA2_MASK 0x03  // bottom 2 bits
+
+
+ #define MEGA_DATAPORT PORTA
+ #define MEGA_DATAPIN  PINA
+ #define MEGA_DATADDR  DDRA
+#endif
+
+
+#include "glcdfont.c"
+#include <avr/pgmspace.h>
+#include "pins_arduino.h"
+#include "wiring_private.h"
+
+
+void PP_TFTLCD::goHome(void) {
+  goTo(0,0);
+}
+
+uint16_t PP_TFTLCD::width(void) {
+  return _width;
+}
+uint16_t PP_TFTLCD::height(void) {
+  return _height;
+}
+
+void PP_TFTLCD::goTo(int x, int y) {
+  writeRegister(0x0020, x);     // GRAM Address Set (Horizontal Address) (R20h)
+  writeRegister(0x0021, y);     // GRAM Address Set (Vertical Address) (R21h)
+  writeCommand(0x0022);            // Write Data to GRAM (R22h)
+}
+
+void PP_TFTLCD::setCursor(uint16_t x, uint16_t y) {
+  cursor_x = x;
+  cursor_y = y;
+}
+
+void PP_TFTLCD::setTextSize(uint8_t s) {
+  textsize = s;
+}
+
+void PP_TFTLCD::setTextColor(uint16_t c) {
+  textcolor = c;
+}
+
+//void PP_TFTLCD::write(uint8_t c) {
+size_t PP_TFTLCD::write(uint8_t c) {
+  if (c == '\n') {
+    cursor_y += textsize*8;
+    cursor_x = 0;
+  } else if (c == '\r') {
+    // skip em
+  } else {
+    drawChar(cursor_x, cursor_y, c, textcolor, textsize);
+    cursor_x += textsize*6;
+  }
+}
+
+void PP_TFTLCD::drawString(uint16_t x, uint16_t y, char *c, 
+			uint16_t color, uint8_t size) {
+  while (c[0] != 0) {
+    drawChar(x, y, c[0], color, size);
+    x += size*6;
+    c++;
+  }
+}
+// draw a character
+void PP_TFTLCD::drawChar(uint16_t x, uint16_t y, char c, 
+		      uint16_t color, uint8_t size) {
+  for (uint8_t i =0; i<5; i++ ) {
+    uint8_t line = pgm_read_byte(font+(c*5)+i);
+    for (uint8_t j = 0; j<8; j++) {
+      if (line & 0x1) {
+	if (size == 1) // default size
+	  drawPixel(x+i, y+j, color);
+	else {  // big size
+	  fillRect(x+i*size, y+j*size, size, size, color);
+	} 
+      }
+      line >>= 1;
+    }
+  }
+}
+
+// draw a triangle!
+void PP_TFTLCD::drawTriangle(uint16_t x0, uint16_t y0,
+			  uint16_t x1, uint16_t y1,
+			  uint16_t x2, uint16_t y2, uint16_t color)
+{
+  drawLine(x0, y0, x1, y1, color);
+  drawLine(x1, y1, x2, y2, color);
+  drawLine(x2, y2, x0, y0, color); 
+}
+
+void PP_TFTLCD::fillTriangle ( int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2, int32_t y2, uint16_t color)
+{
+  if (y0 > y1) {
+    swap(y0, y1); swap(x0, x1);
+  }
+  if (y1 > y2) {
+    swap(y2, y1); swap(x2, x1);
+  }
+  if (y0 > y1) {
+    swap(y0, y1); swap(x0, x1);
+  }
+
+  int32_t dx1, dx2, dx3; // Interpolation deltas
+  int32_t sx1, sx2, sy; // Scanline co-ordinates
+
+  sx2=(int32_t)x0 * (int32_t)1000; // Use fixed point math for x axis values
+  sx1 = sx2;
+  sy=y0;
+
+  // Calculate interpolation deltas
+  if (y1-y0 > 0) dx1=((x1-x0)*1000)/(y1-y0);
+    else dx1=0;
+  if (y2-y0 > 0) dx2=((x2-x0)*1000)/(y2-y0);
+    else dx2=0;
+  if (y2-y1 > 0) dx3=((x2-x1)*1000)/(y2-y1);
+    else dx3=0;
+
+  // Render scanlines (horizontal lines are the fastest rendering method)
+  if (dx1 > dx2)
+  {
+    for(; sy<=y1; sy++, sx1+=dx2, sx2+=dx1)
+    {
+      drawHorizontalLine(sx1/1000, sy, (sx2-sx1)/1000, color);
+    }
+    sx2 = x1*1000;
+    sy = y1;
+    for(; sy<=y2; sy++, sx1+=dx2, sx2+=dx3)
+    {
+      drawHorizontalLine(sx1/1000, sy, (sx2-sx1)/1000, color);
+    }
+  }
+  else
+  {
+    for(; sy<=y1; sy++, sx1+=dx1, sx2+=dx2)
+    {
+      drawHorizontalLine(sx1/1000, sy, (sx2-sx1)/1000, color);
+    }
+    sx1 = x1*1000;
+    sy = y1;
+    for(; sy<=y2; sy++, sx1+=dx3, sx2+=dx2)
+    {
+      drawHorizontalLine(sx1/1000, sy, (sx2-sx1)/1000, color);
+    }
+  }
+}
+
+uint16_t PP_TFTLCD::Color565(uint8_t r, uint8_t g, uint8_t b) {
+  uint16_t c;
+  c = r >> 3;
+  c <<= 6;
+  c |= g >> 2;
+  c <<= 5;
+  c |= b >> 3;
+
+  return c;
+}
+
+// draw a rectangle
+void PP_TFTLCD::drawRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
+		      uint16_t color) {
+  // smarter version
+  drawHorizontalLine(x, y, w, color);
+  drawHorizontalLine(x, y+h-1, w, color);
+  drawVerticalLine(x, y, h, color);
+  drawVerticalLine(x+w-1, y, h, color);
+}
+
+// draw a rounded rectangle
+void PP_TFTLCD::drawRoundRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t r,
+			   uint16_t color) {
+  // smarter version
+  drawHorizontalLine(x+r, y, w-2*r, color);
+  drawHorizontalLine(x+r, y+h-1, w-2*r, color);
+  drawVerticalLine(x, y+r, h-2*r, color);
+  drawVerticalLine(x+w-1, y+r, h-2*r, color);
+  // draw four corners
+  drawCircleHelper(x+r, y+r, r, 1, color);
+  drawCircleHelper(x+w-r-1, y+r, r, 2, color);
+  drawCircleHelper(x+w-r-1, y+h-r-1, r, 4, color);
+  drawCircleHelper(x+r, y+h-r-1, r, 8, color);
+}
+
+
+// fill a rounded rectangle
+void PP_TFTLCD::fillRoundRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t r,
+			   uint16_t color) {
+  // smarter version
+  fillRect(x+r, y, w-2*r, h, color);
+
+  // draw four corners
+  fillCircleHelper(x+w-r-1, y+r, r, 1, h-2*r-1, color);
+  fillCircleHelper(x+r, y+r, r, 2, h-2*r-1, color);
+}
+
+// fill a circle
+void PP_TFTLCD::fillCircle(uint16_t x0, uint16_t y0, uint16_t r, uint16_t color) {
+  writeRegister(PP_TFTLCD_ENTRY_MOD, 0x1030);
+  drawVerticalLine(x0, y0-r, 2*r+1, color);
+  fillCircleHelper(x0, y0, r, 3, 0, color);
+}
+
+
+// used to do circles and roundrects!
+void PP_TFTLCD::fillCircleHelper(uint16_t x0, uint16_t y0, uint16_t r, uint8_t cornername, uint16_t delta,
+			uint16_t color) {
+
+  int16_t f = 1 - r;
+  int16_t ddF_x = 1;
+  int16_t ddF_y = -2 * r;
+  int16_t x = 0;
+  int16_t y = r;
+
+  while (x<y) {
+    if (f >= 0) {
+      y--;
+      ddF_y += 2;
+      f += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f += ddF_x;
+  
+    if (cornername & 0x1) {
+      drawVerticalLine(x0+x, y0-y, 2*y+1+delta, color);
+      drawVerticalLine(x0+y, y0-x, 2*x+1+delta, color);
+    }
+    if (cornername & 0x2) {
+      drawVerticalLine(x0-x, y0-y, 2*y+1+delta, color);
+      drawVerticalLine(x0-y, y0-x, 2*x+1+delta, color);
+    }
+  }
+}
+
+
+// draw a circle outline
+
+void PP_TFTLCD::drawCircle(uint16_t x0, uint16_t y0, uint16_t r, 
+			uint16_t color) {
+  drawPixel(x0, y0+r, color);
+  drawPixel(x0, y0-r, color);
+  drawPixel(x0+r, y0, color);
+  drawPixel(x0-r, y0, color);
+
+  drawCircleHelper(x0, y0, r, 0xF, color);
+}
+
+void PP_TFTLCD::drawCircleHelper(uint16_t x0, uint16_t y0, uint16_t r, uint8_t cornername,
+			uint16_t color) {
+  int16_t f = 1 - r;
+  int16_t ddF_x = 1;
+  int16_t ddF_y = -2 * r;
+  int16_t x = 0;
+  int16_t y = r;
+
+
+  while (x<y) {
+    if (f >= 0) {
+      y--;
+      ddF_y += 2;
+      f += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f += ddF_x;
+    if (cornername & 0x4) {
+      drawPixel(x0 + x, y0 + y, color);
+      drawPixel(x0 + y, y0 + x, color);
+    } 
+    if (cornername & 0x2) {
+      drawPixel(x0 + x, y0 - y, color);
+      drawPixel(x0 + y, y0 - x, color);
+    }
+    if (cornername & 0x8) {
+      drawPixel(x0 - y, y0 + x, color);
+      drawPixel(x0 - x, y0 + y, color);
+    }
+    if (cornername & 0x1) {
+      drawPixel(x0 - y, y0 - x, color);
+      drawPixel(x0 - x, y0 - y, color);
+    }
+  }
+}
+
+// fill a rectangle
+void PP_TFTLCD::fillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
+		      uint16_t fillcolor) {
+  // smarter version
+  while (h--)
+    drawHorizontalLine(x, y++, w, fillcolor);
+}
+
+
+void PP_TFTLCD::drawVerticalLine(uint16_t x, uint16_t y, uint16_t length, uint16_t color)
+{
+  if (x >= _width) return;
+
+  drawFastLine(x,y,length,color,1);
+}
+
+void PP_TFTLCD::drawHorizontalLine(uint16_t x, uint16_t y, uint16_t length, uint16_t color)
+{
+  if (y >= _height) return;
+  drawFastLine(x,y,length,color,0);
+}
+
+void PP_TFTLCD::drawFastLine(uint16_t x, uint16_t y, uint16_t length, 
+			  uint16_t color, uint8_t rotflag)
+{
+  uint16_t newentrymod;
+
+  switch (rotation) {
+  case 0:
+    if (rotflag)
+      newentrymod = 0x1028;   // we want a 'vertical line'
+    else 
+      newentrymod = 0x1030;   // we want a 'horizontal line'
+    break;
+  case 1:
+    swap(x, y);
+    // first up fix the X
+    x = TFTWIDTH - x - 1;
+    if (rotflag)
+      newentrymod = 0x1000;   // we want a 'vertical line'
+    else 
+      newentrymod = 0x1028;   // we want a 'horizontal line'
+    break;
+  case 2:
+    x = TFTWIDTH - x - 1;
+    y = TFTHEIGHT - y - 1;
+    if (rotflag)
+      newentrymod = 0x1008;   // we want a 'vertical line'
+    else 
+      newentrymod = 0x1020;   // we want a 'horizontal line'
+    break;
+  case 3:
+    swap(x,y);
+    y = TFTHEIGHT - y - 1;
+    if (rotflag)
+      newentrymod = 0x1030;   // we want a 'vertical line'
+    else 
+      newentrymod = 0x1008;   // we want a 'horizontal line'
+    break;
+  }
+  
+  writeRegister(PP_TFTLCD_ENTRY_MOD, newentrymod);
+
+  writeRegister(PP_TFTLCD_GRAM_HOR_AD, x); // GRAM Address Set (Horizontal Address) (R20h)
+  writeRegister(PP_TFTLCD_GRAM_VER_AD, y); // GRAM Address Set (Vertical Address) (R21h)
+  writeCommand(PP_TFTLCD_RW_GRAM);  // Write Data to GRAM (R22h)
+
+
+  *portOutputRegister(csport) &= ~cspin;
+  //digitalWrite(_cs, LOW);
+  *portOutputRegister(cdport) |= cdpin;
+  //digitalWrite(_cd, HIGH);
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  *portOutputRegister(wrport) |= wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  setWriteDir();
+  while (length--) {
+    writeData_unsafe(color); 
+  }
+
+  // set back to default
+  *portOutputRegister(csport) |= cspin;
+  //digitalWrite(_cs, HIGH);
+  writeRegister(PP_TFTLCD_ENTRY_MOD, 0x1030);
+}
+
+
+
+// bresenham's algorithm - thx wikpedia
+void PP_TFTLCD::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, 
+		      uint16_t color) {
+  // if you're in rotation 1 or 3, we need to swap the X and Y's
+
+  int16_t steep = abs(y1 - y0) > abs(x1 - x0);
+  if (steep) {
+    swap(x0, y0);
+    swap(x1, y1);
+  }
+
+  if (x0 > x1) {
+    swap(x0, x1);
+    swap(y0, y1);
+  }
+
+  int16_t dx, dy;
+  dx = x1 - x0;
+  //dy = abs(y1 - y0);
+  dy = abs(y1 - y0);
+
+  int16_t err = dx / 2;
+  int16_t ystep;
+
+  if (y0 < y1) {
+    ystep = 1;
+  } else {
+    ystep = -1;}
+
+  for (; x0<=x1; x0++) {
+    if (steep) {
+      drawPixel(y0, x0, color);
+    } else {
+      drawPixel(x0, y0, color);
+    }
+    err -= dy;
+    if (err < 0) {
+      y0 += ystep;
+      err += dx;
+    }
+  }
+}
+
+
+void PP_TFTLCD::fillScreen(uint16_t color) {
+  goHome();
+  uint32_t i;
+  
+  i = 320;
+  i *= 240;
+  
+  *portOutputRegister(csport) &= ~cspin;
+  //digitalWrite(_cs, LOW);
+  *portOutputRegister(cdport) |= cdpin;
+  //digitalWrite(_cd, HIGH);
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  *portOutputRegister(wrport) |= wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  setWriteDir();
+  while (i--) {
+    writeData_unsafe(color); 
+  }
+
+  *portOutputRegister(csport) |= cspin;
+  //digitalWrite(_cs, HIGH);
+}
+
+void PP_TFTLCD::drawPixel(uint16_t x, uint16_t y, uint16_t color)
+{
+  // check rotation, move pixel around if necessary
+  switch (rotation) {
+  case 1:
+    swap(x, y);
+    x = TFTWIDTH - x - 1;
+    break;
+  case 2:
+    x = TFTWIDTH - x - 1;
+    y = TFTHEIGHT - y - 1;
+    break;
+  case 3:
+    swap(x, y);
+    y = TFTHEIGHT - y - 1;
+    break;
+  }
+    
+  if ((x >= TFTWIDTH) || (y >= TFTHEIGHT)) return;
+  writeRegister(PP_TFTLCD_GRAM_HOR_AD, x); // GRAM Address Set (Horizontal Address) (R20h)
+  writeRegister(PP_TFTLCD_GRAM_VER_AD, y); // GRAM Address Set (Vertical Address) (R21h)
+  writeCommand(PP_TFTLCD_RW_GRAM);  // Write Data to GRAM (R22h)
+  writeData(color);
+}
+
+static const uint16_t _regValues[] PROGMEM = {
+	
+     0x0000,0x0000,
+		0x0000,0x0000,
+		0x0000,0x0000,
+		0x0000,0x0000,
+		
+		0x00a4,0x0001,
+		//delay_ms(20,		  
+		0x0060,0x2700,
+		0x0008,0x0202,
+		
+		0x0030,0x0214,
+		0x0031,0x3715,
+		0x0032,0x0604,
+		0x0033,0x0e16,
+		0x0034,0x2211,
+		0x0035,0x1500,
+		0x0036,0x8507,
+		0x0037,0x1407,
+		0x0038,0x1403,
+		0x0039,0x0020,
+		
+		0x0090,0x001a,
+		0x0010,0x0000,
+		0x0011,0x0007,
+		0x0012,0x0000,
+		0x0013,0x0000,
+		//delay_ms(20,
+		
+		0x0010,0x0730,
+		0x0011,0x0137,
+		//delay_ms(20,
+		
+		0x0012,0x01b8,
+		//delay_ms(20,
+		
+		0x0013,0x0f00,
+		0x002a,0x0080,
+		0x0029,0x0048,
+		//delay_ms(20,
+		
+		0x0001,0x0100,
+		0x0002,0x0700,
+		0x0003,0x1230,
+		0x0008,0x0202,
+		0x000a,0x0000,
+		0x000c,0x0000,
+		0x000d,0x01ff,
+		0x000e,0x0000,
+		0x0050,0x0000,
+		0x0051,0x00ef,
+		0x0052,0x0000,
+		0x0053,0x013f,
+		0x0060,0x2700,
+		0x0061,0x0001,
+		0x006a,0x0000,
+		//0x0080,0x0000,
+		//0x0081,0x0000,
+		0x0090,0X0011,
+		0x0092,0x0600,
+		0x0093,0x0402,
+		0x0094,0x0002,
+		//delay_ms(20,
+		
+		0x0007,0x0001,
+		//delay_ms(20,
+		0x0007,0x0061,
+		0x0007,0x0173,
+		
+		0x0020,0x0000,
+		0x0021,0x0000,	  
+		0x00,0x22,  
+
+};
+
+void PP_TFTLCD::initDisplay(void) {
+  uint16_t a, d;
+
+  reset();
+  
+  for (uint8_t i = 0; i < sizeof(_regValues) / 4; i++) {
+    a = pgm_read_word(_regValues + i*2);
+    d = pgm_read_word(_regValues + i*2 + 1);
+
+    if (a == 0xFF) {
+      delay(d);
+    } else {
+      writeRegister(a, d);
+      //Serial.print("addr: "); Serial.print(a); 
+      //Serial.print(" data: "); Serial.println(d, HEX);
+    }
+  }
+}
+
+uint8_t PP_TFTLCD::getRotation(void) {
+  return rotation;
+}
+
+void PP_TFTLCD::setRotation(uint8_t x) {
+  writeRegister(PP_TFTLCD_ENTRY_MOD, 0x1030);
+
+  x %= 4;  // cant be higher than 3
+  rotation = x;
+  switch (x) {
+  case 0:
+    _width = TFTWIDTH; 
+    _height = TFTHEIGHT;
+    break;
+  case 1:
+    _width = TFTHEIGHT; 
+    _height = TFTWIDTH;
+    break;
+  case 2:
+    _width = TFTWIDTH; 
+    _height = TFTHEIGHT;
+    break;
+  case 3:
+    _width = TFTHEIGHT; 
+    _height = TFTWIDTH;
+    break;
+ }
+}
+
+/********************************* low level pin initialization */
+
+PP_TFTLCD::PP_TFTLCD(uint8_t cs, uint8_t cd, uint8_t wr, uint8_t rd, uint8_t reset) {
+  _cs = cs;
+  _cd = cd;
+  _wr = wr;
+  _rd = rd;
+  _reset = reset;
+  
+  rotation = 0;
+  _width = TFTWIDTH;
+  _height = TFTHEIGHT;
+
+  // disable the LCD
+  digitalWrite(_cs, HIGH);
+  pinMode(_cs, OUTPUT);  
+  
+  digitalWrite(_cd, HIGH);
+  pinMode(_cd, OUTPUT);  
+  
+  digitalWrite(_wr, HIGH);
+  pinMode(_wr, OUTPUT);  
+  
+  digitalWrite(_rd, HIGH);
+  pinMode(_rd, OUTPUT);  
+
+  digitalWrite(_reset, HIGH); 
+  pinMode(_reset, OUTPUT); 
+
+  csport = digitalPinToPort(_cs);
+  cdport = digitalPinToPort(_cd);
+  wrport = digitalPinToPort(_wr);
+  rdport = digitalPinToPort(_rd);
+
+  cspin = digitalPinToBitMask(_cs);
+  cdpin = digitalPinToBitMask(_cd);
+  wrpin = digitalPinToBitMask(_wr);
+  rdpin = digitalPinToBitMask(_rd);
+
+  cursor_y = cursor_x = 0;
+  textsize = 1;
+  textcolor = 0xFFFF;
+}
+
+
+/********************************** low level pin interface */
+
+void PP_TFTLCD::reset(void) {
+  if (_reset)
+    digitalWrite(_reset, LOW);
+  delay(2); 
+  if (_reset)
+    digitalWrite(_reset, HIGH);
+
+  // resync
+  writeData(0);
+  writeData(0);
+  writeData(0);  
+  writeData(0);
+}
+
+inline void PP_TFTLCD::setWriteDir(void) {
+#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328P__) || defined (__AVR_ATmega328) || (__AVR_ATmega8__)
+  DATADDR2 |= DATA2_MASK;
+  DATADDR1 |= DATA1_MASK;
+#elif defined(__AVR_ATmega1281__) || defined(__AVR_ATmega2561__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__) 
+
+  #ifdef USE_ADAFRUIT_SHIELD_PINOUT
+  DDRH |= 0x78;
+  DDRB |= 0xB0;
+  DDRG |= _BV(5);
+  #else
+  MEGA_DATADDR = 0xFF;
+  #endif
+#else
+  #error "No pins defined!"
+#endif
+}
+
+inline void PP_TFTLCD::setReadDir(void) {
+#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328P__) || defined (__AVR_ATmega328) || (__AVR_ATmega8__)
+  DATADDR2 &= ~DATA2_MASK;
+  DATADDR1 &= ~DATA1_MASK;
+#elif defined(__AVR_ATmega1281__) || defined(__AVR_ATmega2561__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__) 
+
+  #ifdef USE_ADAFRUIT_SHIELD_PINOUT
+  DDRH &= ~0x78;
+  DDRB &= ~0xB0;
+  DDRG &= ~_BV(5);
+  #else
+  MEGA_DATADDR = 0;
+  #endif
+#else
+  #error "No pins defined!"
+#endif
+}
+
+inline void PP_TFTLCD::write8(uint8_t d) {
+#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328P__) || defined (__AVR_ATmega328) || (__AVR_ATmega8__)
+
+  DATAPORT2 = (DATAPORT2 & DATA1_MASK) | 
+    (d & DATA2_MASK);
+  DATAPORT1 = (DATAPORT1 & DATA2_MASK) | 
+    (d & DATA1_MASK); // top 6 bits
+  
+#elif defined(__AVR_ATmega1281__) || defined(__AVR_ATmega2561__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__) 
+
+
+#ifdef USE_ADAFRUIT_SHIELD_PINOUT
+
+  // bit 6/7 (PH3 & 4)
+  // first two bits 0 & 1 (PH5 & 6)
+  PORTH &= ~(0x78);
+  PORTH |= ((d&0xC0) >> 3) | ((d&0x3) << 5);
+
+  // bits 2 & 3 (PB4 & PB5)
+  // bit 5 (PB7)
+  PORTB &= ~(0xB0); 
+  PORTB |= ((d & 0x2C) << 2);
+
+  // bit 4  (PG5)
+  if (d & _BV(4))
+    PORTG |= _BV(5);
+  else
+    PORTG &= ~_BV(5);
+
+  #else
+     MEGA_DATAPORT = d;  
+  #endif
+
+#else
+  #error "No pins defined!"
+#endif
+}
+
+inline uint8_t PP_TFTLCD::read8(void) {
+ uint8_t d;
+#if defined(__AVR_ATmega168__) || defined(__AVR_ATmega328P__) || defined (__AVR_ATmega328) || (__AVR_ATmega8__)
+
+ d = DATAPIN1 & DATA1_MASK; 
+ d |= DATAPIN2 & DATA2_MASK; 
+
+#elif defined(__AVR_ATmega1281__) || defined(__AVR_ATmega2561__) || defined(__AVR_ATmega2560__)  || defined(__AVR_ATmega1280__) 
+
+#ifdef USE_ADAFRUIT_SHIELD_PINOUT
+
+  // bit 6/7 (PH3 & 4)
+  // first two bits 0 & 1 (PH5 & 6)
+ d = (PINH & 0x60) >> 5;
+ d |= (PINH & 0x18) << 3;
+
+  // bits 2 & 3 & 5 (PB4 & PB5, PB7)
+ d |= (PINB & 0xB0) >> 2;
+
+  // bit 4  (PG5)
+  if (PING & _BV(5))
+    d |= _BV(4);
+
+#else
+ d = MEGA_DATAPIN;  
+#endif
+
+#else
+
+  #error "No pins defined!"
+
+#endif
+
+ return d;
+}
+
+/********************************** low level readwrite interface */
+
+// the C/D pin is high during write
+void PP_TFTLCD::writeData(uint16_t data) {
+  volatile uint8_t *wrportreg = portOutputRegister(wrport);
+
+  *portOutputRegister(csport) &= ~cspin;
+  //digitalWrite(_cs, LOW);
+  *portOutputRegister(cdport) |= cdpin;
+  //digitalWrite(_cd, HIGH);
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  setWriteDir();
+  write8(data >> 8);
+  
+  *wrportreg &= ~wrpin;
+  //digitalWrite(_wr, LOW);
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  write8(data);
+
+  *wrportreg &= ~wrpin;
+  //digitalWrite(_wr, LOW);
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  *portOutputRegister(csport) |= cspin;
+  //digitalWrite(_cs, HIGH);
+}
+
+// this is a 'sped up' version, with no direction setting, or pin initialization
+// not for external usage, but it does speed up stuff like a screen fill
+inline void PP_TFTLCD::writeData_unsafe(uint16_t data) {
+  volatile uint8_t *wrportreg = portOutputRegister(wrport);
+
+  write8(data >> 8);
+
+  *wrportreg &= ~wrpin;
+  //digitalWrite(_wr, LOW);
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  write8(data);
+
+  *wrportreg &= ~wrpin;
+  //digitalWrite(_wr, LOW);
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+}
+
+// the C/D pin is low during write
+void PP_TFTLCD::writeCommand(uint16_t cmd) {
+  volatile uint8_t *wrportreg = portOutputRegister(wrport);
+
+  *portOutputRegister(csport) &= ~cspin;
+  //digitalWrite(_cs, LOW);
+  *portOutputRegister(cdport) &= ~cdpin;
+  //digitalWrite(_cd, LOW);
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  setWriteDir();
+  write8(cmd >> 8);
+
+  *wrportreg &= ~wrpin;
+  //digitalWrite(_wr, LOW);
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  write8(cmd);
+
+  *wrportreg &= ~wrpin;
+  //digitalWrite(_wr, LOW);
+  *wrportreg |=  wrpin;
+  //digitalWrite(_wr, HIGH);
+
+  *portOutputRegister(csport) |= cspin;
+}
+
+uint16_t PP_TFTLCD::readData() {
+ uint16_t d = 0;
+ 
+  *portOutputRegister(csport) &= ~cspin;
+  //digitalWrite(_cs, LOW);
+  *portOutputRegister(cdport) |= cdpin;
+  //digitalWrite(_cd, HIGH);
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  *portOutputRegister(wrport) |= wrpin;
+  //digitalWrite(_wr, HIGH);
+  
+  setReadDir();
+
+  *portOutputRegister(rdport) &= ~rdpin;
+  //digitalWrite(_rd, LOW);
+
+  delayMicroseconds(10);
+  d = read8();
+  d <<= 8;
+
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  *portOutputRegister(rdport) &= ~rdpin;
+  //digitalWrite(_rd, LOW);
+
+  delayMicroseconds(10);
+  d |= read8();
+
+  *portOutputRegister(rdport) |= rdpin;
+  //digitalWrite(_rd, HIGH);
+  
+  *portOutputRegister(csport) |= cspin;
+  //digitalWrite(_cs, HIGH);
+   
+  return d;
+}
+
+
+/************************************* medium level data reading/writing */
+
+uint16_t PP_TFTLCD::readRegister(uint16_t addr) {
+   writeCommand(addr);
+   return readData();
+}
+
+void PP_TFTLCD::writeRegister(uint16_t addr, uint16_t data) {
+   writeCommand(addr);
+   writeData(data);
+}
+
+
+
+
